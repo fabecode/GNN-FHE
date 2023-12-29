@@ -52,21 +52,22 @@ with open(outPath, 'w') as writer:
 
         ts = ts - firstTs
 
-        cur1 = get_dict_val(raw[i,"Receiving Currency"], currency)
-        cur2 = get_dict_val(raw[i,"Payment Currency"], currency)
+        cur1 = int(get_dict_val(raw[i,"Receiving Currency"], currency))
+        cur2 = int(get_dict_val(raw[i,"Payment Currency"], currency))
 
-        fmt = get_dict_val(raw[i,"Payment Format"], paymentFormat)
+        fmt = int(get_dict_val(raw[i,"Payment Format"], paymentFormat))
 
         fromAccIdStr = raw[i,"From Bank"] + raw[i,2]
-        fromId = get_dict_val(fromAccIdStr, account)
+        fromId = int(get_dict_val(fromAccIdStr, account))
+        print(fromAccIdStr)
 
         toAccIdStr = raw[i,"To Bank"] + raw[i,4]
-        toId = get_dict_val(toAccIdStr, account)
+        toId = int(get_dict_val(toAccIdStr, account))
 
-        amountReceivedOrig = raw[i,"Amount Received"]
-        amountPaidOrig = raw[i,"Amount Paid"]
+        amountReceivedOrig = float(raw[i,"Amount Received"])
+        amountPaidOrig = float(raw[i,"Amount Paid"])
 
-        isl = raw[i,"Is Laundering"]
+        isl = int(raw[i,"Is Laundering"])
 
         line = '%d,%d,%d,%d,%f,%d,%f,%d,%d,%d\n' % \
                     (i,fromId,toId,ts,amountPaidOrig,cur2, amountReceivedOrig,cur1,fmt,isl)
