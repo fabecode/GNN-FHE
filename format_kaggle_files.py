@@ -12,7 +12,8 @@ if n == 1:
     sys.exit()
 
 inPath = sys.argv[1]
-outPath = os.path.dirname(inPath) + "/formatted_transactions.csv"
+#outPath = os.path.dirname(inPath) + "/formatted_transactions.csv"
+outPath = sys.argv[2]
 
 raw = dt.fread(inPath, columns = dt.str32)
 
@@ -59,7 +60,6 @@ with open(outPath, 'w') as writer:
 
         fromAccIdStr = raw[i,"From Bank"] + raw[i,2]
         fromId = int(get_dict_val(fromAccIdStr, account))
-        print(fromAccIdStr)
 
         toAccIdStr = raw[i,"To Bank"] + raw[i,4]
         toId = int(get_dict_val(toAccIdStr, account))
@@ -78,3 +78,4 @@ formatted = dt.fread(outPath)
 formatted = formatted[:,:,sort(3)]
 
 formatted.to_csv(outPath)
+print("Formatted transactions saved to " + outPath)
