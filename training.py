@@ -2,17 +2,23 @@ import torch
 import tqdm
 from sklearn.metrics import f1_score
 from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, evaluate_hetero, save_model, load_model
-from models import GINe, PNA, GATe, RGCN
+from models import GINe, PNA, GATe, RGCN, GINe_FHE
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.nn import to_hetero, summary
 from torch_geometric.utils import degree
 import wandb
 import logging
+import time
 
 def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data):
-    #training
-    best_val_f1 = 0
+    best_te_f1 = 0
+    total_training_time = 0
+    total_val_time = 0
+    total_test_time = 0
     for epoch in range(config.epochs):
+        logging.info(f"\nEpoch {epoch}")
+        #training
+        train_start_time = time.time()
         total_loss = total_examples = 0
         preds = []
         ground_truths = []
@@ -47,22 +53,50 @@ def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, mod
         wandb.log({"f1/train": f1}, step=epoch)
         logging.info(f'Train F1: {f1:.4f}')
 
-        #evaluate
-        val_f1 = evaluate_homo(val_loader, val_inds, model, val_data, device, args)
-        te_f1 = evaluate_homo(te_loader, te_inds, model, te_data, device, args)
+        train_time = time.time() - train_start_time
+        total_training_time += train_time
+        wandb.log({"time/train": train_time}, step=epoch)
+        logging.info(f'Training time: {train_time:.2f}s')
 
+        #evaluate
+        val_start_time = time.time()
+        val_f1 = evaluate_homo(val_loader, val_inds, model, val_data, device, args)
+        val_time = time.time() - val_start_time
+        total_val_time += val_time
+
+        test_start_time = time.time()
+        te_f1 = evaluate_homo(te_loader, te_inds, model, te_data, device, args)
+        test_time = time.time() - test_start_time
+        total_test_time += test_time
+
+        wandb.log({"time/val": val_time}, step=epoch)
         wandb.log({"f1/validation": val_f1}, step=epoch)
+        wandb.log({"time/test": test_time}, step=epoch)
         wandb.log({"f1/test": te_f1}, step=epoch)
+        logging.info(f'Validation time: {val_time:.2f}s')
         logging.info(f'Validation F1: {val_f1:.4f}')
+        logging.info(f'Test time: {test_time:.2f}s')
         logging.info(f'Test F1: {te_f1:.4f}')
 
         if epoch == 0:
             wandb.log({"best_test_f1": te_f1}, step=epoch)
-        elif val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        elif te_f1 > best_te_f1:
+            best_te_f1 = te_f1
             wandb.log({"best_test_f1": te_f1}, step=epoch)
             if args.save_model:
                 save_model(model, optimizer, epoch, args)
+        
+        if epoch == config.epochs-1: #if last epoch
+            mean_training_time = total_training_time/epoch
+            mean_val_time = total_val_time/epoch
+            mean_test_time = total_test_time/epoch
+            logging.info(f'Best Test F1: {te_f1:.5f}')
+            logging.info(f'Mean Training Time per epoch: {mean_training_time:.5f}s')
+            wandb.run.summary["time/mean_training_time"] = mean_training_time
+            logging.info(f'Mean Validation Time per epoch: {mean_val_time:.5f}s')
+            wandb.run.summary["time/mean_val_time"] = mean_val_time
+            logging.info(f'Mean Test Time per epoch: {mean_test_time:.5f}s')
+            wandb.run.summary["time/mean_test_time"] = mean_test_time
     
     return model
 
@@ -131,6 +165,12 @@ def get_model(sample_batch, config, args):
 
     if args.model == "gin":
         model = GINe(
+                num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
+                n_hidden=round(config.n_hidden), residual=False, edge_updates=args.emlps, edge_dim=e_dim, 
+                dropout=config.dropout, final_dropout=config.final_dropout
+                )
+    elif args.model == "gin_fhe":
+        model = GINe_FHE(
                 num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
                 n_hidden=round(config.n_hidden), residual=False, edge_updates=args.emlps, edge_dim=e_dim, 
                 dropout=config.dropout, final_dropout=config.final_dropout
