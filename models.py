@@ -3,6 +3,7 @@ from torch_geometric.nn import GINEConv, BatchNorm, Linear, GATConv, PNAConv, RG
 import torch.nn.functional as F
 import torch
 import logging
+from brevitas import nn as qnn
 
 class GINe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
@@ -23,7 +24,7 @@ class GINe(torch.nn.Module):
         for _ in range(self.num_gnn_layers):
             conv = GINEConv(nn.Sequential(
                 nn.Linear(self.n_hidden, self.n_hidden), 
-                nn.ReLU(), 
+                nn.ReLU(),
                 nn.Linear(self.n_hidden, self.n_hidden)
                 ), edge_dim=self.n_hidden)
             if self.edge_updates: self.emlps.append(nn.Sequential(
@@ -54,6 +55,72 @@ class GINe(torch.nn.Module):
         
         return self.mlp(out)
     
+class GINe_FHE(torch.nn.Module):
+    def __init__(self, num_features, num_gnn_layers, n_classes=2, 
+                 n_hidden=100, edge_updates=False, residual=True, 
+                 edge_dim=None, dropout=0.0, final_dropout=0.5,
+                 weight_bit_width=8, accumulator_bit_width=8):  # Set desired bit widths
+        super().__init__()
+        self.n_hidden = n_hidden
+        self.num_gnn_layers = num_gnn_layers
+        self.edge_updates = edge_updates
+        self.final_dropout = final_dropout
+
+        # Quantized linear layers for node and edge embeddings
+        self.node_emb = qnn.QuantLinear(num_features, n_hidden, weight_bit_width=weight_bit_width, bias=False)
+        self.edge_emb = qnn.QuantLinear(edge_dim, n_hidden, weight_bit_width=weight_bit_width, bias=False)
+
+        self.convs = nn.ModuleList()
+        self.emlps = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+
+        for _ in range(self.num_gnn_layers):
+            # Quantized GINEConv layers
+            conv = GINEConv(nn.Sequential(
+                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width), 
+                qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
+                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width)
+            ), edge_dim=self.n_hidden)
+            
+            if self.edge_updates:
+                # Quantized MLP layers for edge updates
+                self.emlps.append(nn.Sequential(
+                    qnn.QuantLinear(3 * self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width),
+                    qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
+                    qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width)
+                ))
+            self.convs.append(conv)
+            self.batch_norms.append(BatchNorm(n_hidden))
+
+        # Quantized MLP for final classification
+        self.mlp = nn.Sequential(
+            qnn.QuantLinear(n_hidden*3, 50, weight_bit_width=weight_bit_width),
+            qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
+            nn.Dropout(self.final_dropout),
+            qnn.QuantLinear(50, 25, weight_bit_width=weight_bit_width),
+            qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
+            nn.Dropout(self.final_dropout),
+            qnn.QuantLinear(25, n_classes, weight_bit_width=weight_bit_width)
+        )
+
+    def forward(self, x, edge_index, edge_attr):
+        src, dst = edge_index
+
+        # Forward pass with quantized layers
+        x = self.node_emb(x)
+        edge_attr = self.edge_emb(edge_attr)
+
+        for i in range(self.num_gnn_layers):
+            x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
+            if self.edge_updates:
+                edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
+
+        x = x[edge_index.T].reshape(-1, 2 * self.n_hidden).relu()
+        x = torch.cat((x, edge_attr.view(-1, edge_attr.shape[1])), 1)
+        out = x
+
+        return self.mlp(out)
+
 class GATe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, n_hidden=100, n_heads=4, edge_updates=False, edge_dim=None, dropout=0.0, final_dropout=0.5):
         super().__init__()
