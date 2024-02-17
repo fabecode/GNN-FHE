@@ -59,7 +59,7 @@ class GINe_FHE(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
                  n_hidden=100, edge_updates=False, residual=True, 
                  edge_dim=None, dropout=0.0, final_dropout=0.5,
-                 weight_bit_width=8, accumulator_bit_width=8):  # Set desired bit widths
+                 weight_bit_width=16, accumulator_bit_width=16):  # Set desired bit widths
         super().__init__()
         self.n_hidden = n_hidden
         self.num_gnn_layers = num_gnn_layers
@@ -67,8 +67,8 @@ class GINe_FHE(torch.nn.Module):
         self.final_dropout = final_dropout
 
         # Quantized linear layers for node and edge embeddings
-        self.node_emb = qnn.QuantLinear(num_features, n_hidden, weight_bit_width=weight_bit_width, bias=False)
-        self.edge_emb = qnn.QuantLinear(edge_dim, n_hidden, weight_bit_width=weight_bit_width, bias=False)
+        self.node_emb = qnn.QuantLinear(num_features, n_hidden, weight_bit_width=weight_bit_width, bias=True)
+        self.edge_emb = qnn.QuantLinear(edge_dim, n_hidden, weight_bit_width=weight_bit_width, bias=True)
 
         self.convs = nn.ModuleList()
         self.emlps = nn.ModuleList()
@@ -77,30 +77,30 @@ class GINe_FHE(torch.nn.Module):
         for _ in range(self.num_gnn_layers):
             # Quantized GINEConv layers
             conv = GINEConv(nn.Sequential(
-                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width), 
+                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True), 
                 qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
-                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width)
+                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True)
             ), edge_dim=self.n_hidden)
             
             if self.edge_updates:
                 # Quantized MLP layers for edge updates
                 self.emlps.append(nn.Sequential(
-                    qnn.QuantLinear(3 * self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width),
+                    qnn.QuantLinear(3 * self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True),
                     qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
-                    qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width)
+                    qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True)
                 ))
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(n_hidden))
 
         # Quantized MLP for final classification
         self.mlp = nn.Sequential(
-            qnn.QuantLinear(n_hidden*3, 50, weight_bit_width=weight_bit_width),
+            qnn.QuantLinear(n_hidden*3, 50, weight_bit_width=weight_bit_width, bias=True),
             qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
             nn.Dropout(self.final_dropout),
-            qnn.QuantLinear(50, 25, weight_bit_width=weight_bit_width),
+            qnn.QuantLinear(50, 25, weight_bit_width=weight_bit_width, bias=True),
             qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
             nn.Dropout(self.final_dropout),
-            qnn.QuantLinear(25, n_classes, weight_bit_width=weight_bit_width)
+            qnn.QuantLinear(25, n_classes, weight_bit_width=weight_bit_width, bias=True)
         )
 
     def forward(self, x, edge_index, edge_attr):
