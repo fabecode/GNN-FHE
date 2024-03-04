@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch
 import logging
 from brevitas import nn as qnn
+from torch.nn.utils import prune
 
 class GINe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
@@ -74,6 +75,9 @@ class GINe_FHE(torch.nn.Module):
         self.emlps = nn.ModuleList()
         self.batch_norms = nn.ModuleList()
 
+        #Keep track of pruned layers
+        self.pruned_layers = set()
+
         for _ in range(self.num_gnn_layers):
             # Quantized GINEConv layers
             conv = GINEConv(nn.Sequential(
@@ -120,6 +124,20 @@ class GINe_FHE(torch.nn.Module):
         out = x
 
         return self.mlp(out)
+    
+    def prune(self, threshold):
+        # Linear layer weight has dimensions NumOutputs x NumInputs
+        for name, layer in self.named_modules():
+            if isinstance(layer, qnn.QuantLinear):
+                mask = torch.abs(layer.weight) < threshold  # Create mask of weights below threshold
+                prune.custom_from_mask(layer, "weight", mask)  #weight in layer set to 0 where mask = True
+                self.pruned_layers.add(name)
+
+    def unprune(self):
+        for name, layer in self.named_modules():
+            if name in self.pruned_layers:
+                prune.remove(layer, "weight")
+                self.pruned_layers.remove(name)
 
 class GATe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, n_hidden=100, n_heads=4, edge_updates=False, edge_dim=None, dropout=0.0, final_dropout=0.5):
