@@ -6,6 +6,9 @@ import logging
 from brevitas import nn as qnn
 from torch.nn.utils import prune
 
+from torch import Tensor
+from typing import Optional
+
 class GINe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
                 n_hidden=100, edge_updates=False, residual=True, 
@@ -55,7 +58,14 @@ class GINe(torch.nn.Module):
         out = x
         
         return self.mlp(out)
-    
+
+class DebugQuantLinear(qnn.QuantLinear):
+    def inner_forward_impl(self, x: Tensor, quant_weight: Tensor, quant_bias: Optional[Tensor]) -> Tensor:
+        print(f"Input shapes - x: {x.shape}, quant_weight: {quant_weight.shape}, quant_bias: {quant_bias.shape}")
+        output_tensor = super().inner_forward_impl(x, quant_weight, quant_bias)
+        print("Output shape:", output_tensor.shape)
+        return output_tensor
+
 class GINe_FHE(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
                  n_hidden=100, edge_updates=False, residual=True, 
@@ -68,8 +78,10 @@ class GINe_FHE(torch.nn.Module):
         self.final_dropout = final_dropout
 
         # Quantized linear layers for node and edge embeddings
-        self.node_emb = qnn.QuantLinear(num_features, n_hidden, weight_bit_width=weight_bit_width, bias=True)
-        self.edge_emb = qnn.QuantLinear(edge_dim, n_hidden, weight_bit_width=weight_bit_width, bias=True)
+        print("Node embedding layer: ", num_features, n_hidden, weight_bit_width)
+        self.node_emb = DebugQuantLinear(num_features, n_hidden, weight_bit_width=weight_bit_width, bias=True)
+        print("Edge embedding layer: ", edge_dim, n_hidden, weight_bit_width)
+        self.edge_emb = DebugQuantLinear(edge_dim, n_hidden, weight_bit_width=weight_bit_width, bias=True)
 
         self.convs = nn.ModuleList()
         self.emlps = nn.ModuleList()
@@ -80,34 +92,39 @@ class GINe_FHE(torch.nn.Module):
 
         for _ in range(self.num_gnn_layers):
             # Quantized GINEConv layers
+            print(f"Conv layer: {self.n_hidden}, {self.n_hidden}, {weight_bit_width}")
             conv = GINEConv(nn.Sequential(
-                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True), 
+                DebugQuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True), 
                 qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
-                qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True)
+                DebugQuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True)
             ), edge_dim=self.n_hidden)
             
             if self.edge_updates:
                 # Quantized MLP layers for edge updates
                 self.emlps.append(nn.Sequential(
-                    qnn.QuantLinear(3 * self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True),
+                    DebugQuantLinear(3 * self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True),
                     qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
-                    qnn.QuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True)
+                    DebugQuantLinear(self.n_hidden, self.n_hidden, weight_bit_width=weight_bit_width, bias=True)
                 ))
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(n_hidden))
 
         # Quantized MLP for final classification
+        print(f"MLP layers: {n_hidden*3}, 50, {weight_bit_width}")
         self.mlp = nn.Sequential(
-            qnn.QuantLinear(n_hidden*3, 50, weight_bit_width=weight_bit_width, bias=True),
+            DebugQuantLinear(n_hidden*3, 50, weight_bit_width=weight_bit_width, bias=True),
+            qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit widths
+            nn.Dropout(self.final_dropout),
+            DebugQuantLinear(50, 25, weight_bit_width=weight_bit_width, bias=True),
             qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
             nn.Dropout(self.final_dropout),
-            qnn.QuantLinear(50, 25, weight_bit_width=weight_bit_width, bias=True),
-            qnn.QuantReLU(bit_width=accumulator_bit_width),  # Set accumulator bit width
-            nn.Dropout(self.final_dropout),
-            qnn.QuantLinear(25, n_classes, weight_bit_width=weight_bit_width, bias=True)
+            DebugQuantLinear(25, n_classes, weight_bit_width=weight_bit_width, bias=True)
         )
 
     def forward(self, x, edge_index, edge_attr):
+        print("x initial:", x)
+        print("edge_index initial:", edge_index)
+        print("edge_attr initial:", edge_attr)
         src, dst = edge_index
 
         # Forward pass with quantized layers
@@ -120,15 +137,17 @@ class GINe_FHE(torch.nn.Module):
                 edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
 
         x = x[edge_index.T].reshape(-1, 2 * self.n_hidden).relu()
+        print("x after processing: ", x)
         x = torch.cat((x, edge_attr.view(-1, edge_attr.shape[1])), 1)
         out = x
+        print("out: ", out)
 
         return self.mlp(out)
     
     def prune(self, threshold):
         # Linear layer weight has dimensions NumOutputs x NumInputs
         for name, layer in self.named_modules():
-            if isinstance(layer, qnn.QuantLinear):
+            if isinstance(layer, DebugQuantLinear):
                 mask = torch.abs(layer.weight) < threshold  # Create mask of weights below threshold
                 prune.custom_from_mask(layer, "weight", mask)  #weight in layer set to 0 where mask = True
                 self.pruned_layers.add(name)
