@@ -8,7 +8,7 @@ from data_util import GraphData, HeteroData, z_norm, create_hetero_obj
 def get_data(args):
     '''This function is used to get the AML data in a graph format ready to be used for GNN training.'''
 
-    transaction_file = f"/path_to_data/{args.data}/transactions.csv" #replace this with your path to the respective AML data objects
+    transaction_file = f"./data/{args.data}.csv" #replace this with your path to the respective AML data objects
     df_edges = pd.read_csv(transaction_file)
 
     logging.info(f'Available Edge Features: {df_edges.columns.tolist()}')
