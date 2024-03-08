@@ -2,15 +2,127 @@ import torch
 import tqdm
 from sklearn.metrics import f1_score
 from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, evaluate_hetero, save_model, load_model
-from models import GINe, PNA, GATe, RGCN, GINe_FHE
+from models import GINe, PNA, GATe, RGCN, GINe_FHE, Model_Wrapper
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.nn import to_hetero, summary
 from torch_geometric.utils import degree
+from torch.utils.data import TensorDataset
+from concrete.ml.torch.compile import compile_brevitas_qat_model
+import numpy as np
 import wandb
 import logging
 import time
+import tempfile
+from pathlib import Path
 
-def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data):
+def compile_and_test(tr_loader, te_loader, inds, torch_model, tr_data, te_data, args, use_sim=True):
+    X_test = te_data.x
+    y_test = te_data.y
+
+    for batch in tqdm.tqdm(te_loader, disable=not args.tqdm):
+        batch = batch
+        break
+
+    #remove the unique edge id from the edge features, as it's no longer needed
+    batch.edge_attr = batch.edge_attr[:, 1:]
+
+    #wrapped_model = Model_Wrapper(torch_model)
+    wrapped_model = Model_Wrapper(torch_model, batch.x, batch.edge_index, batch.edge_attr)
+
+    onnx_model_path = "debug_gnn_model.onnx"
+
+    # Compile the model
+    print("Compiling the model")
+    print("batch.x", batch.x)
+
+    start_compile = time.time()
+    quantized_numpy_module = compile_brevitas_qat_model(
+        wrapped_model,  # Our model
+        batch.x,  # A representative input-set to be used for both quantization and compilation\
+        output_onnx_file=onnx_model_path,
+        verbose=True
+    )
+    end_compile = time.time()
+    print(f"Compilation finished in {end_compile - start_compile:.2f} seconds")
+
+    # Check that the network is compatible with FHE constraints
+    bitwidth = quantized_numpy_module.fhe_circuit.graph.maximum_integer_bit_width()
+    print(
+        f"Max bit-width: {bitwidth} bits" + " -> it works in FHE!!"
+        if bitwidth <= 16
+        else " too high for FHE computation"
+    )
+
+    # Execute prediction using simulation
+    # (not encrypted but fast, and results are equivalent)
+
+    if not use_sim:
+        print("Generating key")
+        start_key = time.time()
+        quantized_numpy_module.fhe_circuit.keygen()
+        end_key = time.time()
+        print(f"Key generation finished in {end_key - start_key:.2f} seconds")
+
+    fhe_mode = "simulate" if use_sim else "execute"
+
+    predictions = np.zeros_like(y_test)
+
+    preds = []
+    ground_truths = []
+    for batch in tqdm.tqdm(te_loader, disable=not args.tqdm):
+        #select the seed edges from which the batch was created
+        inds = inds.detach().cpu()
+        batch_edge_inds = inds[batch.input_id.detach().cpu()]
+        batch_edge_ids = te_loader.data.edge_attr.detach().cpu()[batch_edge_inds, 0]
+        mask = torch.isin(batch.edge_attr[:, 0].detach().cpu(), batch_edge_ids)
+
+        #add the seed edges that have not been sampled to the batch
+        missing = ~torch.isin(batch_edge_ids, batch.edge_attr[:, 0].detach().cpu())
+
+        if missing.sum() != 0 and (args.data == 'Small_J' or args.data == 'Small_Q'):
+            missing_ids = batch_edge_ids[missing].int()
+            n_ids = batch.n_id
+            add_edge_index = te_data.edge_index[:, missing_ids].detach().clone()
+            node_mapping = {value.item(): idx for idx, value in enumerate(n_ids)}
+            add_edge_index = torch.tensor([[node_mapping[val.item()] for val in row] for row in add_edge_index])
+            add_edge_attr = te_data.edge_attr[missing_ids, :].detach().clone()
+            add_y = te_data.y[missing_ids].detach().clone()
+        
+            batch.edge_index = torch.cat((batch.edge_index, add_edge_index), 1)
+            batch.edge_attr = torch.cat((batch.edge_attr, add_edge_attr), 0)
+            batch.y = torch.cat((batch.y, add_y), 0)
+
+            mask = torch.cat((mask, torch.ones(add_y.shape[0], dtype=torch.bool)))
+
+        #remove the unique edge id from the edge features, as it's no longer needed
+        batch.edge_attr = batch.edge_attr[:, 1:]
+
+        print("Starting inference")
+        start_infer = time.time()
+        pred = quantized_numpy_module.forward(batch.x).argmax(1)
+        end_infer = time.time()
+
+        print(f"Compilation finished in {end_compile - start_compile:.2f} seconds")
+        if not use_sim:
+            print(f"Key generation finished in {end_key - start_key:.2f} seconds")
+            print(
+                f"Inferences finished in {end_infer - start_infer:.2f} seconds "
+                f"({(end_infer - start_infer)/len(batch.x):.2f} seconds/sample)"
+            )
+
+        preds.append(pred)
+        ground_truths.append(batch.y[mask])
+
+    # Compute accuracy
+    pred = torch.cat(preds, dim=0).cpu().numpy()
+    ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
+    accuracy = np.mean(pred == ground_truth) * 100
+    print(f"Test Quantized Accuracy: {accuracy:.2f}% on {len(X_test)} examples.")
+    f1 = f1_score(ground_truth, pred)
+
+    return bitwidth, accuracy, f1, predictions, quantized_numpy_module
+
+def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, tr_data, val_data, te_data):
     best_te_f1 = 0
     total_training_time = 0
     total_val_time = 0
@@ -65,7 +177,12 @@ def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, mod
         total_val_time += val_time
 
         test_start_time = time.time()
-        te_f1 = evaluate_homo(te_loader, te_inds, model, te_data, device, args)
+        if args.fhe:
+            _, _, te_f1, clear_prediction, vl_quantized_numpy_module = compile_and_test(
+                tr_loader, te_loader, te_inds, model, tr_data.x, te_data, args, use_sim=True
+            )
+        else:
+           te_f1 = evaluate_homo(te_loader, te_inds, model, te_data, device, args)
         test_time = time.time() - test_start_time
         total_test_time += test_time
 
@@ -271,6 +388,6 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args):
     if args.reverse_mp:
         model = train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data)
     else:
-        model = train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data)
+        model = train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, tr_data, val_data, te_data)
     
     wandb.finish()
