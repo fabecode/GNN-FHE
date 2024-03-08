@@ -45,6 +45,7 @@ def create_parser():
     parser.add_argument("--unique_name", action='store_true', help="Unique name under which the model will be stored.")
     parser.add_argument("--finetune", action='store_true', help="Fine-tune a model. Note that args.unique_name needs to point to the pre-trained model.")
     parser.add_argument("--inference", action='store_true', help="Load a trained model and only do AML inference with it. args.unique name needs to point to the trained model.")
+    parser.add_argument("--fhe", action='store_true', help="Use Fully Homomorphic Encryption.")
 
     return parser
 
