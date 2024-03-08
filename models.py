@@ -138,6 +138,23 @@ class GINe_FHE(torch.nn.Module):
             if name in self.pruned_layers:
                 prune.remove(layer, "weight")
                 self.pruned_layers.remove(name)
+    
+class Model_Wrapper(torch.nn.Module):
+    def __init__(self, original_model, x, edge_index, edge_attr):
+        super(Model_Wrapper, self).__init__()
+        self.original_model = original_model
+        self.x = x
+        self.edge_index = edge_index
+        self.edge_attr = edge_attr
+
+    def forward(self, x):
+        # Assuming you have default values for edge_index and edge_attr
+        x = self.x
+        print("x:", x)
+        print("edge_attr:", self.edge_attr)
+        print("edge_attr.shape:", self.edge_attr.shape)
+
+        return self.original_model(x, self.edge_index, self.edge_attr)
 
 class GATe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, n_hidden=100, n_heads=4, edge_updates=False, edge_dim=None, dropout=0.0, final_dropout=0.5):
