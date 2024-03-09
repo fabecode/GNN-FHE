@@ -6,8 +6,10 @@ It contains all models and adaptations needed to run Multi-GNN for Anti-Money La
 ## Setup
 To use the repository, you first need to install the conda environment via 
 ```
-conda env create -f env.yml
+conda env create -f env.yml python=3.9
 ```
+Note that concrete-ml requires torch 1.13.1 to work.
+
 Then, the data needed for the experiments can be found on [Kaggle](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml/data). To use this data with the provided training scripts, you first need to perform a pre-processing step:
 ```
 python format_kaggle_files.py /path/to/kaggle-file/
